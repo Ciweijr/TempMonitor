@@ -7,19 +7,23 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 固定运行环境，避免 ubuntu-latest 未来自动升级到 Ubuntu 26 带来的不确定性
+    runs-on: ubuntu-24.04 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # 升级至 v5 或更高，以兼容 Node 24
+        uses: actions/checkout@v5
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        # 升级至 v5，这是解决弃用警告的关键
+        uses: actions/setup-java@v5
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        # 升级至 v4，这是 Node 24 兼容版本
+        uses: android-actions/setup-android@v4
 
       - name: Accept licenses & install SDK
         run: |
@@ -27,236 +31,22 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null || true
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        # 这个 Action 通常不是警告的来源，保持最新稳定版即可
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
 
       - name: Create project files
         run: |
           set -e
-
-          cat > settings.gradle <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "TempMonitor"
-          include ':app'
-          EOF
-
-          cat > build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application' version '8.1.4' apply false
-          }
-          EOF
-
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          org.gradle.jvmargs=-Xmx2048m
-          EOF
-
-          mkdir -p app/src/main/java/com/example/thermometer
-
-          cat > app/build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application'
-          }
-          android {
-              namespace 'com.example.thermometer'
-              compileSdk 34
-              defaultConfig {
-                  applicationId "com.example.thermometer"
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              buildTypes {
-                  release {
-                      minifyEnabled false
-                  }
-              }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          EOF
-
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application
-                  android:label="温度监控"
-                  android:icon="@android:drawable/sym_def_app_icon"
-                  android:theme="@android:style/Theme.Material.Light">
-                  <activity android:name=".MainActivity" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          cat > app/src/main/java/com/example/thermometer/MainActivity.java <<'EOF'
-          package com.example.thermometer;
-
-          import android.app.Activity;
-          import android.content.Intent;
-          import android.content.IntentFilter;
-          import android.os.BatteryManager;
-          import android.os.Bundle;
-          import android.os.Handler;
-          import android.os.Looper;
-          import android.view.Gravity;
-          import android.widget.LinearLayout;
-          import android.widget.TextView;
-
-          import java.io.BufferedReader;
-          import java.io.InputStreamReader;
-
-          public class MainActivity extends Activity {
-
-              private static final String THERMAL_FILE =
-                      "/sys/class/thermal/thermal_message/board_sensor_temp";
-              private static final long INTERVAL_MS = 1000L;
-
-              private TextView tvValue;
-              private TextView tvStatus;
-              private final Handler handler = new Handler(Looper.getMainLooper());
-
-              private final Runnable ticker = new Runnable() {
-                  @Override public void run() {
-                      readTemperature();
-                      handler.postDelayed(this, INTERVAL_MS);
-                  }
-              };
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(48, 120, 48, 48);
-                  root.setGravity(Gravity.CENTER_HORIZONTAL);
-
-                  TextView title = new TextView(this);
-                  title.setText("主板温度 (board_sensor_temp)");
-                  title.setTextSize(18);
-                  root.addView(title);
-
-                  tvValue = new TextView(this);
-                  tvValue.setText("--");
-                  tvValue.setTextSize(56);
-                  tvValue.setPadding(0, 24, 0, 24);
-                  root.addView(tvValue);
-
-                  tvStatus = new TextView(this);
-                  tvStatus.setText("初始化...");
-                  tvStatus.setTextSize(12);
-                  root.addView(tvStatus);
-
-                  setContentView(root);
-              }
-
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  handler.post(ticker);
-              }
-
-              @Override
-              protected void onPause() {
-                  super.onPause();
-                  handler.removeCallbacks(ticker);
-              }
-
-              private void readTemperature() {
-                  new Thread(() -> {
-                      String raw = execCat(false);
-                      String mode = "普通";
-                      if (raw == null || raw.trim().isEmpty()) {
-                          raw = execCat(true);
-                          mode = "root";
-                      }
-                      String outValue;
-                      String outStatus;
-                      if (raw == null || raw.trim().isEmpty()) {
-                          float bat = getBatteryTemp();
-                          if (bat > 0) {
-                              outValue = String.format("%.1f °C", bat);
-                              outStatus = "主板温度不可读（需 Root），当前为电池温度";
-                          } else {
-                              outValue = "--";
-                              outStatus = "读取失败：无权限或节点不存在";
-                          }
-                      } else {
-                          try {
-                              double v = Double.parseDouble(raw.trim());
-                              double celsius = v > 1000 ? v / 1000.0 : v;
-                              outValue = String.format("%.1f °C", celsius);
-                              outStatus = "原始值: " + raw.trim() + " | 模式: " + mode;
-                          } catch (NumberFormatException e) {
-                              outValue = raw.trim();
-                              outStatus = "非数值 | 模式: " + mode;
-                          }
-                      }
-                      final String vOut = outValue;
-                      final String sOut = outStatus;
-                      handler.post(() -> {
-                          tvValue.setText(vOut);
-                          tvStatus.setText(sOut);
-                      });
-                  }).start();
-              }
-
-              private String execCat(boolean useSu) {
-                  try {
-                      String[] cmd = useSu
-                              ? new String[]{"su", "-c", "cat " + THERMAL_FILE}
-                              : new String[]{"cat", THERMAL_FILE};
-                      Process p = Runtime.getRuntime().exec(cmd);
-                      BufferedReader r = new BufferedReader(
-                              new InputStreamReader(p.getInputStream()));
-                      String line = r.readLine();
-                      r.close();
-                      p.waitFor();
-                      return line;
-                  } catch (Exception e) {
-                      return null;
-                  }
-              }
-
-              private float getBatteryTemp() {
-                  try {
-                      IntentFilter f = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
-                      Intent b = registerReceiver(null, f);
-                      if (b != null) {
-                          int tenths = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);
-                          if (tenths > 0) return tenths / 10.0f;
-                      }
-                  } catch (Exception ignored) {}
-                  return -1;
-              }
-          }
-          EOF
+          # ... 这里是你原来的 Create project files 脚本，内容无需任何修改 ...
+          # 请务必保留你原来的这段脚本，我这里只是注释说明，不要直接复制这一行注释
 
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK
+        # 升级至 v4，这是目前最新且支持 Node 24 的版本
         uses: actions/upload-artifact@v4
         with:
           name: TempMonitor-debug-apk
